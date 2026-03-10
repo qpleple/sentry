@@ -452,18 +452,22 @@ src/sentry/event_manager.py:save_attachments
 src/sentry/event_manager.py:_tsdb_record_all_metrics
   -> src/sentry/tsdb/__init__.py:tsdb.backend.incr_multi (BACKEND)
        Configured via settings.SENTRY_TSDB (default: "sentry.tsdb.dummy.DummyTSDB")
-       Production backends:
+       Production: RedisSnubaTSDB routes per-model via model_backends dict:
        -> src/sentry/tsdb/redissnuba.py:RedisSnubaTSDB.incr_multi
-            -> src/sentry/tsdb/redis.py:RedisTSDB.incr_multi
-                 -> Redis pipeline: INCRBY on time-bucketed keys
-       -> src/sentry/tsdb/dummy.py:DummyTSDB.incr_multi [no-op]
+            Routes based on TSDBModel:
+            -> src/sentry/tsdb/redis.py:RedisTSDB.incr_multi [for group/project/release models]
+                 -> Redis pipeline: HINCRBY on time-bucketed hash keys with TTL
+            -> src/sentry/tsdb/dummy.py:DummyTSDB.incr_multi [for outcome-based models, write is no-op]
+       -> src/sentry/tsdb/dummy.py:DummyTSDB.incr_multi [default config, all no-op]
   -> src/sentry/tsdb/__init__.py:tsdb.backend.record_multi (BACKEND)
        -> src/sentry/tsdb/redissnuba.py:RedisSnubaTSDB.record_multi
-            -> Redis PFADD (HyperLogLog for unique user counting)
+            -> src/sentry/tsdb/redis.py:RedisTSDB.record_multi
+                 -> Redis PFADD (HyperLogLog for unique user counting)
        -> src/sentry/tsdb/dummy.py:DummyTSDB.record_multi [no-op]
   -> src/sentry/tsdb/__init__.py:tsdb.backend.record_frequency_multi (BACKEND)
        -> src/sentry/tsdb/redissnuba.py:RedisSnubaTSDB.record_frequency_multi
-            -> Redis ZINCRBY on sorted sets
+            -> src/sentry/tsdb/redis.py:RedisTSDB.record_frequency_multi
+                 -> Redis ZINCRBY on sorted sets + Count-Min sketch estimation
        -> src/sentry/tsdb/dummy.py:DummyTSDB.record_frequency_multi [no-op]
 ```
 
@@ -473,16 +477,23 @@ src/sentry/event_manager.py:_tsdb_record_all_metrics
 
 ```
 src/sentry/event_manager.py:_nodestore_save_many
-  -> src/sentry/services/eventstore/processing.py:event_processing_store.get [for error events]
-       -> Redis/cache GET for unprocessed event data
+  -> src/sentry/services/eventstore/processing.py:event_processing_store.get [for error events with groups] (BACKEND)
+       Configured via settings.SENTRY_EVENT_PROCESSING_STORE
+       -> src/sentry/services/eventstore/processing/redis.py:RedisClusterEventProcessingStore.get
+            -> Redis Cluster KV GET (JSON deserialized)
+       -> src/sentry/services/eventstore/processing/bigtable.py:BigtableEventProcessingStore.get [alt]
+            -> Google Bigtable KV GET (JSON deserialized)
+  -> src/sentry/utils/cache.py:cache_key_for_event [builds cache key for unprocessed event]
   -> src/sentry/usage_accountant/__init__.py:record [COGS tracking]
-  -> src/sentry/eventstore/models.py:EventDict.save (via job["event"].data.save)
-       -> src/sentry/services/nodestore/__init__.py:nodestore.backend.set (BACKEND)
-            Configured via settings.SENTRY_NODESTORE (default: "sentry.services.nodestore.django.DjangoNodeStorage")
-            -> src/sentry/services/nodestore/django/backend.py:DjangoNodeStorage.set
-                 -> src/sentry/models/node.py:Node.objects.create / update
-            -> src/sentry/services/nodestore/bigtable/backend.py:BigtableNodeStorage.set [GCP production]
-                 -> Google Cloud Bigtable row mutation
+  -> src/sentry/db/models/fields/node.py:NodeData.save (via job["event"].data.save)
+       -> src/sentry/services/nodestore/base.py:NodeStorage.set_subkeys
+            -> src/sentry/services/nodestore/base.py:NodeStorage._encode [newline-separated JSON]
+            -> src/sentry/services/nodestore/base.py:NodeStorage.set_bytes (BACKEND)
+                 Configured via settings.SENTRY_NODESTORE (default: "sentry.services.nodestore.django.DjangoNodeStorage")
+                 -> src/sentry/services/nodestore/django/backend.py:DjangoNodeStorage._set_bytes
+                      -> Compresses data, then Node.objects.create_or_update (PostgreSQL)
+                 -> src/sentry/services/nodestore/bigtable/backend.py:BigtableNodeStorage._set_bytes [production]
+                      -> Compresses data (zlib/zstd), then BigtableKVStorage.set (Google Bigtable)
 ```
 
 ---
@@ -576,6 +587,7 @@ All backends resolved via `LazyServiceWrapper` + `import_string()` at first use:
 | `quotas` | `SENTRY_QUOTAS` | `sentry.quotas.base.Quota` | `sentry.quotas.redis.RedisQuota` |
 | `buffer` | `SENTRY_BUFFER` | `sentry.buffer.base.Buffer` | `sentry.buffer.redis.RedisBuffer` |
 | `ratelimiter` | `SENTRY_RATELIMITER` | `sentry.ratelimits.redis.RedisRateLimiter` | same |
+| `event_processing_store` | `SENTRY_EVENT_PROCESSING_STORE` | `sentry.services.eventstore.processing.redis.RedisClusterEventProcessingStore` | `BigtableEventProcessingStore` (GCP) |
 | `cache` | `SENTRY_CACHE` | (required) | Redis-backed |
 
 ---
