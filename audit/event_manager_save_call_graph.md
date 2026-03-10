@@ -413,9 +413,11 @@ src/sentry/event_manager.py:discard_event
 ### `filter_attachments_for_group()`
 ```
 src/sentry/event_manager.py:filter_attachments_for_group
-  -> src/sentry/event_manager.py:get_max_crashreports
-       -> src/sentry/models/project.py:Project.get_option
-       -> src/sentry/models/organization.py:Organization.get_option [fallback]
+  -> src/sentry/event_manager.py:get_max_crashreports(project, allow_none=True)
+       -> model.get_option("sentry:store_crash_reports")
+       -> src/sentry/lang/native/utils.py:convert_crashreport_count
+  -> src/sentry/event_manager.py:get_max_crashreports(project.organization) [if first returned None]
+       -> model.get_option("sentry:store_crash_reports")
        -> src/sentry/lang/native/utils.py:convert_crashreport_count
   -> src/sentry/models/eventattachment.py:get_crashreport_key
   -> src/sentry/event_manager.py:get_stored_crashreports
@@ -521,7 +523,7 @@ src/sentry/event_manager.py:_eventstream_insert_many
               -> src/sentry/tasks/post_process.py:post_process_group.apply_async (CELERY)
 
        PATH B: src/sentry/eventstream/kafka/backend.py:KafkaEventStream.insert
-         -> src/sentry/eventstream/snuba.py:SnubaProtocolEventStream.insert [same as above minus _send]
+         -> src/sentry/eventstream/snuba.py:SnubaProtocolEventStream.insert [_send resolves to KafkaEventStream._send override]
          -> src/sentry/eventstream/kafka/backend.py:KafkaEventStream._send
               -> Arroyo KafkaProducer.produce (KAFKA)
                    Topic determined by event type:
@@ -544,6 +546,8 @@ src/sentry/event_manager.py:_get_severity_metadata_for_group
   -> src/sentry/killswitches.py:killswitch_matches_context
   -> src/sentry/features/__init__.py:features.has ["organizations:seer-based-priority"] (DYNAMIC - handler chain)
   -> src/sentry/features/__init__.py:features.has ["projects:first-event-severity-calculation"]
+  -> [returns {} if platform not in PLATFORMS_WITH_PRIORITY_ALERTS]
+  -> [returns {} if group_type is not ErrorGroupType]
   -> src/sentry/utils/circuit_breaker.py:circuit_breaker_activated
        -> django.core.cache:cache.get [error count check]
   -> src/sentry/ratelimits/__init__.py:ratelimiter.backend.is_limited (BACKEND)
