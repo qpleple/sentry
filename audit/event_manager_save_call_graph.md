@@ -42,9 +42,8 @@ src/sentry/event_manager.py:EventManager.save
   -> src/sentry/event_manager.py:_set_project_platform_if_needed
        -> src/sentry/eventstore/models.py:Event.get_tag ["sample_event" check]
        -> src/sentry/models/project.py:Project.objects.filter().update() [platform not set]
+       -> src/sentry/audit_log/__init__.py:audit_log.get_event_id [passed as argument]
        -> src/sentry/utils/audit.py:create_system_audit_entry [platform updated]
-            -> src/sentry/audit_log/__init__.py:audit_log.get_event_id
-            -> src/sentry/models/auditlogentry.py:AuditLogEntry.__init__
             -> src/sentry/audit_log/services/log.py:log_service.record_audit_log
   -> src/sentry/event_manager.py:save_transaction_events [event_type == "transaction"]
   -> src/sentry/event_manager.py:save_generic_events [event_type == "generic"]
