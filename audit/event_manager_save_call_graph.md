@@ -48,10 +48,10 @@ src/sentry/event_manager.py:EventManager.save
             -> src/sentry/audit_log/services/log.py:log_service.record_audit_log
   -> src/sentry/event_manager.py:save_transaction_events [event_type == "transaction"]
   -> src/sentry/event_manager.py:save_generic_events [event_type == "generic"]
+  -> src/sentry/grouping/ingest/config.py:is_in_transition [populates metric_tags]
+  -> src/sentry/grouping/enhancer/__init__.py:get_enhancements_version [populates metric_tags]
+  -> src/sentry/utils/tag_normalization.py:normalized_sdk_tag_from_event [populates metric_tags]
   -> src/sentry/event_manager.py:EventManager.save_error_events [else (error/default/csp/etc.)]
-       -> src/sentry/grouping/ingest/config.py:is_in_transition
-       -> src/sentry/grouping/enhancer/__init__.py:get_enhancements_version
-       -> src/sentry/utils/tag_normalization.py:normalized_sdk_tag_from_event
 ```
 
 ---
@@ -64,9 +64,10 @@ src/sentry/event_manager.py:EventManager.save_error_events
   -> src/sentry/event_manager.py:_get_or_create_release_many
        [returns early if no release in data]
        -> src/sentry/models/release.py:Release.get_or_create
-            -> src/sentry/models/release.py:Release.objects.get_or_create
-            -> src/sentry/models/releases/release_project.py:ReleaseProject.objects.get_or_create
-            -> src/sentry/receivers/onboarding.py:record_release_received (SIGNAL via post_save)
+            -> src/sentry/models/release.py:Release.objects.create [try]
+            -> src/sentry/models/release.py:Release.objects.get [on IntegrityError]
+            -> src/sentry/models/release.py:Release.add_project
+                 -> src/sentry/models/releases/release_project.py:ReleaseProject.objects.get_or_create
        [catches ValidationError -> sets release=None]
        -> src/sentry/event_manager.py:pop_tag [remove conflicting "release" tag]
        -> src/sentry/event_manager.py:set_tag ["sentry:release"]
@@ -164,7 +165,7 @@ src/sentry/event_manager.py:save_transaction_events
   -> src/sentry/event_manager.py:_derive_interface_tags_many [same as error path]
   -> src/sentry/event_manager.py:_calculate_span_grouping
        -> src/sentry/eventstore/models.py:Event.get_span_groupings
-       -> SpanGrouping.write_to_event
+       -> SpanGroupingResults.write_to_event
   -> src/sentry/event_manager.py:_materialize_metadata_many
        -> src/sentry/event_manager.py:get_event_type
             -> src/sentry/eventtypes/__init__.py:eventtypes.get (DYNAMIC registry)
@@ -207,7 +208,6 @@ src/sentry/event_manager.py:save_transaction_events
        -> src/sentry/dynamic_sampling/rules/helpers/latest_releases.py:record_latest_release [if release]
             -> Redis operations (boosted releases tracking)
             -> src/sentry/tasks/relay.py:schedule_invalidate_project_config (CELERY) [on new boost]
-       -> src/sentry/receivers/onboarding.py:record_release_received [if release]
 ```
 
 ---
@@ -239,7 +239,6 @@ src/sentry/event_manager.py:assign_event_to_group
             -> src/sentry/grouping/api.py:get_grouping_config_dict_for_project
             -> src/sentry/grouping/ingest/hashing.py:_calculate_primary_hashes_and_variants
                  -> src/sentry/grouping/api.py:get_grouping_variants_for_event
-                 -> src/sentry/grouping/api.py:sort_grouping_variants
        -> src/sentry/grouping/ingest/hashing.py:get_or_create_grouphashes
             -> src/sentry/grouping/ingest/hashing.py:_get_or_create_single_grouphash
                  -> src/sentry/models/grouphash.py:GroupHash.objects.get_or_create
@@ -299,7 +298,6 @@ src/sentry/event_manager.py:handle_existing_grouphash
             -> src/sentry/event_manager.py:get_event_type (DYNAMIC registry)
             -> EventType.get_metadata [polymorphic]
             -> src/sentry/event_manager.py:materialize_metadata
-       -> src/sentry/event_manager.py:sdk_metadata_from_event
   -> src/sentry/event_manager.py:_process_existing_aggregate
        [SEE SECTION 7]
   -> src/sentry/workflow_engine/processors/detector.py:ensure_association_with_detector
@@ -517,8 +515,8 @@ src/sentry/event_manager.py:_eventstream_insert_many
               -> Determines EventStreamEventType (Error/Transaction/Generic)
               -> src/sentry/eventstream/snuba.py:SnubaEventStream._send
                    -> HTTP POST to Snuba /tests/{entity}/eventstream
-              -> src/sentry/eventstream/snuba.py:SnubaEventStream._forward_event_to_items [if EAP enabled]
-                   -> HTTP POST to Snuba /api/v1/eap_insert
+              -> src/sentry/eventstream/snuba.py:SnubaProtocolEventStream._forward_event_to_items [if EAP enabled]
+                   -> HTTP POST to Snuba EAP_ITEMS_INSERT_ENDPOINT
          -> src/sentry/eventstream/base.py:EventStream._dispatch_post_process_group_task
               -> src/sentry/tasks/post_process.py:post_process_group.apply_async (CELERY)
 
@@ -532,8 +530,8 @@ src/sentry/event_manager.py:_eventstream_insert_many
                    -> Topic.EVENTSTREAM_GENERIC [generic events]
          -> src/sentry/eventstream/kafka/backend.py:KafkaEventStream._send_item [if EAP enabled]
               -> Arroyo KafkaProducer.produce to Topic.SNUBA_ITEMS (KAFKA)
-         -> src/sentry/eventstream/base.py:EventStream._dispatch_post_process_group_task
-              -> src/sentry/tasks/post_process.py:post_process_group.apply_async (CELERY)
+         [NOTE: KafkaEventStream.requires_post_process_forwarder() returns True]
+         [post_process_group is dispatched by a separate Kafka consumer, NOT inline]
 ```
 
 ---
@@ -580,13 +578,13 @@ All backends resolved via `LazyServiceWrapper` + `import_string()` at first use:
 
 | Module | Setting | Default Backend | Production Backend |
 |--------|---------|----------------|-------------------|
-| `eventstore` | `SENTRY_EVENTSTREAM` | `sentry.eventstream.snuba.SnubaEventStream` | `sentry.eventstream.kafka.KafkaEventStream` |
+| `eventstream` | `SENTRY_EVENTSTREAM` | `sentry.eventstream.snuba.SnubaEventStream` | `sentry.eventstream.kafka.KafkaEventStream` |
 | `eventstore` (storage) | internal | `sentry.eventstore.snuba.SnubaEventStorage` | same |
 | `tsdb` | `SENTRY_TSDB` | `sentry.tsdb.dummy.DummyTSDB` | `sentry.tsdb.redissnuba.RedisSnubaTSDB` |
 | `nodestore` | `SENTRY_NODESTORE` | `sentry.services.nodestore.django.DjangoNodeStorage` | `sentry.services.nodestore.bigtable.BigtableNodeStorage` |
-| `quotas` | `SENTRY_QUOTAS` | `sentry.quotas.base.Quota` | `sentry.quotas.redis.RedisQuota` |
-| `buffer` | `SENTRY_BUFFER` | `sentry.buffer.base.Buffer` | `sentry.buffer.redis.RedisBuffer` |
-| `ratelimiter` | `SENTRY_RATELIMITER` | `sentry.ratelimits.redis.RedisRateLimiter` | same |
+| `quotas` | `SENTRY_QUOTAS` | `sentry.quotas.Quota` | `sentry.quotas.redis.RedisQuota` |
+| `buffer` | `SENTRY_BUFFER` | `sentry.buffer.Buffer` | `sentry.buffer.redis.RedisBuffer` |
+| `ratelimiter` | `SENTRY_RATELIMITER` | `sentry.ratelimits.base.RateLimiter` | `sentry.ratelimits.redis.RedisRateLimiter` |
 | `event_processing_store` | `SENTRY_EVENT_PROCESSING_STORE` | `sentry.services.eventstore.processing.redis.RedisClusterEventProcessingStore` | `BigtableEventProcessingStore` (GCP) |
 | `cache` | `SENTRY_CACHE` | (required) | Redis-backed |
 
@@ -613,7 +611,7 @@ Async tasks dispatched during `EventManager.save()`:
 
 | Task | Condition | Location |
 |------|-----------|----------|
-| `post_process_group` | Always (via eventstream) | `tasks/post_process.py` |
+| `post_process_group` | Always (via eventstream); inline for SnubaEventStream, via external forwarder for KafkaEventStream | `tasks/post_process.py` |
 | `kick_off_status_syncs` | Regression detected | `integrations/tasks/kick_off_status_syncs.py` |
 | `sync_status_outbound` | Per external issue (from kick_off_status_syncs) | `integrations/tasks/` |
 | `schedule_invalidate_project_config` | Transaction path, new boosted release | `tasks/relay.py` |
@@ -658,6 +656,7 @@ The three top-level paths share these functions:
 | `_get_event_user_many` | Y | Y | Y |
 | `_derive_plugin_tags_many` | Y | Y | Y |
 | `_derive_interface_tags_many` | Y | Y | Y |
+| `_derive_client_error_sampling_rate` | Y | N | N |
 | `_materialize_metadata_many` | N (via _get_group_processing_kwargs) | Y | Y |
 | `_calculate_span_grouping` | N | Y | N |
 | `_get_or_create_environment_many` | Y | Y | Y |
