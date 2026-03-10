@@ -628,8 +628,8 @@ Async tasks dispatched during `EventManager.save()`:
 | `post_process_group` | Always (via eventstream); inline for SnubaEventStream, via external forwarder for KafkaEventStream | `tasks/post_process.py` |
 | `kick_off_status_syncs` | Regression detected | `integrations/tasks/kick_off_status_syncs.py` |
 | `sync_status_outbound` | Per external issue (from kick_off_status_syncs) | `integrations/tasks/` |
-| `schedule_invalidate_project_config` | Transaction path, new boosted release | `tasks/relay.py` |
-| `buffer_incr` (via buffer backend) | Group/ReleaseProject/RPE updates | `tasks/process_buffer.py` → `buffer/redis.py` |
+| `schedule_invalidate_project_config` | Transaction path, new boosted release; also indirect via `ReleaseProject.post_save` signal | `tasks/relay.py` |
+| `buffer_incr` (via buffer backend) | Group/GroupTombstone/ReleaseProject/RPE updates | `tasks/process_buffer.py` → `buffer/redis.py` |
 
 ---
 
