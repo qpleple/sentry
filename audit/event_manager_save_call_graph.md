@@ -249,23 +249,31 @@ src/sentry/event_manager.py:assign_event_to_group
             -> raises HashDiscarded [if tombstone found]
   -> src/sentry/event_manager.py:handle_existing_grouphash [primary.existing_grouphash found]
        [SEE SECTION 6]
-  -> src/sentry/grouping/ingest/seer.py:maybe_send_seer_for_new_model_training [existing grouphash found]
+  -> src/sentry/grouping/ingest/seer.py:maybe_send_seer_for_new_model_training [primary existing grouphash found]
        -> src/sentry/seer/similarity/config.py:should_send_to_seer_for_training
        -> src/sentry/grouping/ingest/seer.py:should_call_seer_for_grouping
        -> src/sentry/grouping/ingest/seer.py:_build_seer_request
+       -> src/sentry/seer/signed_seer_api.py:SeerViewerContext.__init__
        -> src/sentry/seer/similarity/similar_issues.py:get_similarity_data_from_seer
             -> HTTP POST to Seer service /v0/issues/similar-issues
+       -> src/sentry/seer/similarity/config.py:get_new_model_version
+       -> GroupHashMetadata.update [seer_latest_training_model]
   -> src/sentry/event_manager.py:get_hashes_and_grouphashes [secondary, if no primary match]
        -> src/sentry/grouping/ingest/hashing.py:maybe_run_secondary_grouping (callback)
             -> src/sentry/grouping/ingest/config.py:is_in_transition
             -> src/sentry/grouping/api.py:SecondaryGroupingConfigLoader.get_config_dict
             -> src/sentry/grouping/ingest/hashing.py:_calculate_secondary_hashes
   -> src/sentry/event_manager.py:handle_existing_grouphash [secondary.existing_grouphash found]
+  -> src/sentry/grouping/ingest/seer.py:maybe_send_seer_for_new_model_training [secondary existing grouphash found]
+       [same subtree as primary match above]
   -> src/sentry/grouping/ingest/seer.py:maybe_check_seer_for_matching_grouphash [no primary or secondary match]
        -> src/sentry/grouping/ingest/seer.py:should_call_seer_for_grouping
             -> Feature flag checks, platform checks, project option checks
        -> src/sentry/grouping/ingest/seer.py:get_seer_similar_issues
-            -> HTTP POST to Seer service /v0/issues/similar-issues
+            -> src/sentry/grouping/ingest/seer.py:_build_seer_request
+            -> src/sentry/seer/signed_seer_api.py:SeerViewerContext.__init__
+            -> src/sentry/seer/similarity/similar_issues.py:get_similarity_data_from_seer
+                 -> HTTP POST to Seer service /v0/issues/similar-issues
        -> src/sentry/grouping/ingest/seer.py:record_did_call_seer_metric
   -> src/sentry/event_manager.py:handle_existing_grouphash [Seer match found]
   -> src/sentry/event_manager.py:create_group_with_grouphashes [no match at all]
@@ -298,6 +306,8 @@ src/sentry/event_manager.py:handle_existing_grouphash
             -> src/sentry/event_manager.py:get_event_type (DYNAMIC registry)
             -> EventType.get_metadata [polymorphic]
             -> src/sentry/event_manager.py:materialize_metadata
+       -> src/sentry/event_manager.py:get_event_type [separate call for group kwargs]
+       -> src/sentry/event_manager.py:materialize_metadata [separate call merging metadata]
   -> src/sentry/event_manager.py:_process_existing_aggregate
        [SEE SECTION 7]
   -> src/sentry/workflow_engine/processors/detector.py:ensure_association_with_detector
@@ -391,7 +401,7 @@ src/sentry/event_manager.py:create_group_with_grouphashes
        -> src/sentry/models/detector.py:Detector.objects.filter [for error groups]
        -> src/sentry/models/detectorgroup.py:DetectorGroup.objects.get_or_create
   -> src/sentry/grouping/ingest/utils.py:add_group_id_to_grouphashes
-  -> src/sentry/event_manager.py:handle_existing_grouphash [race condition: lost to another process]
+  -> src/sentry/event_manager.py:handle_existing_grouphash [race condition: lost to another process, uses locked grouphashes from select_for_update]
        [SEE SECTION 6]
 ```
 
